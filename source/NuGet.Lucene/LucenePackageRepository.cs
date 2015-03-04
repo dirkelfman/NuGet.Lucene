@@ -1,4 +1,6 @@
-﻿using System;
+﻿using System.Collections.Specialized;
+using Lucene.Net.Util;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -16,6 +18,7 @@ using LuceneDirectory = Lucene.Net.Store.Directory;
 
 #if NET_4_5
 using TaskEx=System.Threading.Tasks.Task;
+using System.Web;
 #endif
 
 namespace NuGet.Lucene
@@ -26,7 +29,24 @@ namespace NuGet.Lucene
 
         public LuceneDataProvider LuceneDataProvider { get; set; }
 
-        public IQueryable<LucenePackage> LucenePackages { get; set; }
+        private IQueryable<LucenePackage> _queryable;
+        public IQueryable<LucenePackage> LucenePackages
+        {
+            get
+            {
+                return FeedQueryHandler.Process(_queryable);
+
+            //new global::Lucene.Net.Search.Query()
+            //    string tag = "bootstrap";
+            //    var subQ = _queryable.Where(pkg => pkg.Tags.Contains(tag,StringComparer.OrdinalIgnoreCase) );
+            //    return subQ;
+            }
+            set { _queryable = value; }
+        }
+
+        private DynamicFeedQueryHandler _dynamicFeedQueryHandler = new DynamicFeedQueryHandler();
+        DynamicFeedQueryHandler FeedQueryHandler { get { return _dynamicFeedQueryHandler; } set { value = _dynamicFeedQueryHandler; } }
+        
 
         public IPackageIndexer Indexer { get; set; }
 
@@ -487,5 +507,115 @@ namespace NuGet.Lucene
                 .Select(f => f.DateTime)
                 .FirstOrDefault();
         }
+    }
+
+   
+
+    public class DynamicFeedQueryHandler
+    {
+        public string HostSuffix
+        {
+            get { return System.Configuration.ConfigurationManager.AppSettings["NuGet.Lucene.hostSuffix"]; }
+        }
+
+        public string Default
+        {
+            get { return System.Configuration.ConfigurationManager.AppSettings["NuGet.Lucene.defaultHostPrefix"]; }
+        }
+
+        public IQueryable<LucenePackage> Process(IQueryable<LucenePackage> lucenePackages)
+        {
+            var ctx =System.Web.HttpContext.Current;
+            if (ctx == null)
+            {
+                return lucenePackages;
+            }
+            var host = ctx.Request.Headers["testHost"];
+            if (!string.IsNullOrEmpty(host))
+            {
+                host = host.Split(':')[0];
+            }
+            else
+            {
+                host = ctx.Request.Url.Host;
+            }
+            if (host.Equals(HostSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return lucenePackages;
+            }
+            else if (host.EndsWith(HostSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return this.Process(lucenePackages, host.Substring(0, host.Length - (HostSuffix.Length+1)));
+            }
+            else
+            {
+                return lucenePackages;
+            }
+            
+        }
+
+        public IQueryable<LucenePackage> Process(IQueryable<LucenePackage> lucenePackages, string hostPrefix)
+        {
+            if (string.Equals(hostPrefix, Default, StringComparison.OrdinalIgnoreCase))
+            {
+                return lucenePackages;
+            }
+
+            string[] parts = hostPrefix.Split(new string[] { "--" }, StringSplitOptions.RemoveEmptyEntries);
+            var queryAble = lucenePackages;
+            foreach (var part in parts)
+            {
+                var term = part;
+                bool isGreaterThan = true;
+                SemanticVersion ver = null;
+                if (part.StartsWith("-"))
+                {
+                    isGreaterThan = false;
+                    term = part.Substring(1);
+                }
+                if (SemanticVersion.TryParse(term, out ver))
+                {
+                    StrictSemanticVersion ssv = new StrictSemanticVersion( ver);
+                    if (isGreaterThan)
+                    {
+                        queryAble = from
+                            pkg in queryAble
+                                    where
+                                        (pkg.Tags == part) ||
+                                        (pkg.Version >= ssv)
+
+                                    select
+                                        pkg;
+                    }
+                    else
+                    {
+                        queryAble = from
+                            pkg in queryAble
+                                    where
+                                        (pkg.Tags == part) ||
+                                        (pkg.Version <= ssv)
+
+                                    select
+                                        pkg;
+                    }
+                   
+                }
+                else
+                {
+                    queryAble = from
+                      pkg in queryAble
+                                where
+                                    (pkg.Tags == part) 
+                                select
+                                    pkg;
+                }
+            }
+            return queryAble;
+
+
+        }
+
+
+
     }
 }
